@@ -1,0 +1,106 @@
+package client
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"tcp-server/internal/pkg/config"
+	"tcp-server/internal/pkg/pow"
+	"tcp-server/internal/pkg/protocol"
+	"time"
+)
+
+func Run(ctx context.Context, address string) error {
+	conn, err := net.Dial("tcp", address)
+	if err != nil {
+		return err
+	}
+	fmt.Println("connected to", address)
+	defer conn.Close()
+
+	//client send new request every 5
+	for {
+		message, err := HandleConnection(ctx, conn, conn)
+		if err != nil {
+			return err
+		}
+		fmt.Println("quote result:", message)
+		time.Sleep(5 * time.Second)
+
+	}
+}
+
+//handle connection
+
+func HandleConnection(ctx context.Context, readerConn io.Reader, writerConn io.Writer) (string, error) {
+	//requesting challenge
+	reader := bufio.NewReader(readerConn)
+	err := sendMsg(protocol.Message{
+		Header: protocol.RequestChallenge,
+	}, writerConn)
+	if err != nil {
+		return "", fmt.Errorf("error send request:%w", err)
+	}
+	msgStr, err := readConnMsg(reader)
+	if err != nil {
+		return "", fmt.Errorf("error read message:%w", err)
+	}
+
+	msg, err := protocol.ParseMessage(msgStr)
+	if err != nil {
+		return "", fmt.Errorf("error parse message:%w", err)
+	}
+	var hashcash pow.HashcashData
+	err = json.Unmarshal([]byte(msg.Payload), &hashcash)
+	if err != nil {
+		return "", fmt.Errorf("error parse hashcash:%w", err)
+	}
+	fmt.Println("got hashcash", hashcash)
+
+	//got challenge
+
+	conf := ctx.Value("config").(*config.Config)
+	hashcash, err = hashcash.ComputeHashCash(conf.HashcashMaxIterations)
+	if err != nil {
+		return "", fmt.Errorf("error compute hashcash:%w", err)
+	}
+	fmt.Println(" hashcash computed", hashcash)
+	byteData, err := json.Marshal(hashcash)
+	if err != nil {
+		return "", fmt.Errorf("error marshal hashcash:%w", err)
+	}
+
+	//send challenge back to server
+	err = sendMsg(protocol.Message{
+		Header:  protocol.RequestResource,
+		Payload: string(byteData),
+	}, writerConn)
+	if err != nil {
+		return "", fmt.Errorf("error send requests:%w", err)
+	}
+	fmt.Println("challenge sent to server")
+
+	//get result quote from server
+	msgStr, err = readConnMsg(reader)
+	if err != nil {
+		return "", fmt.Errorf("error read message:%w", err)
+	}
+	msg, err = protocol.ParseMessage(msgStr)
+	if err != nil {
+		return "", fmt.Errorf("error parse message:%w", err)
+	}
+	return msg.Payload, nil
+}
+
+func readConnMsg(reader *bufio.Reader) (string, error) {
+	return reader.ReadString('\n')
+}
+
+func sendMsg(msg protocol.Message, conn io.Writer) error {
+	msgStr := fmt.Sprintf("%s\n", msg.Stringify())
+	_, err := conn.Write([]byte(msgStr))
+	return err
+}
